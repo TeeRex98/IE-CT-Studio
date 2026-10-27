@@ -45,6 +45,9 @@
   input[type=text], input[type=number], input[type=date], select, input[type=file]{
     border:1px solid var(--line); border-radius:8px; padding:9px 10px; font-size:13.5px; background:#fff; color:var(--ink); }
   input[type=number]{ width:80px; }
+  textarea.step-name{ border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13.5px; font-weight:500; background:#fff; color:var(--ink);
+    font-family:inherit; line-height:1.3; resize:horizontal; overflow:hidden; display:block; }
+  textarea.step-name:disabled{ opacity:.85; background:#f7f5ee; color:var(--ink); -webkit-text-fill-color:var(--ink); }
   label.field-label{ font-size:12px; font-weight:500; opacity:.7; }
 
   .lcd{ background:var(--lcd-bg); border-radius:14px; padding:26px 18px; display:flex; flex-direction:column;
@@ -86,9 +89,9 @@
 
   @media(min-width:860px){
     .grid-2{ grid-template-columns: 1fr 320px; }
-    .grid-timer-3{ grid-template-columns: 260px 1fr 300px; }
+    .grid-timer-3{ grid-template-columns: 240px minmax(0,1fr) 280px; }
     .grid-models{ grid-template-columns: 220px 1fr; }
-    .grid-models-3{ grid-template-columns: 190px 220px 1fr; }
+    .grid-models-3{ grid-template-columns: 190px minmax(260px,320px) 1fr; }
   }
   @media(max-width:520px){
     .lcd-clock{ font-size:36px; }
@@ -151,6 +154,19 @@ function median(a){
   return s.length%2 ? s[mid] : (s[mid-1]+s[mid])/2;
 }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
+/* File-name tag that mirrors the Report filters: model + date range (+ grouping when asked). */
+function reportFileTag(withGroup){
+  var parts = [];
+  var m = (state.reportFilterModel !== "all") ? state.models.find(function(x){ return x.id === state.reportFilterModel; }) : null;
+  parts.push(m ? (String(m.name||"model").toLowerCase().trim().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"") || "model") : "all-models");
+  if (withGroup) parts.push("by-" + (state.reportGroupBy || "step"));
+  var f = state.reportDateFrom, t = state.reportDateTo;
+  if (f && t) parts.push(f === t ? f : (f + "_to_" + t));
+  else if (f) parts.push("from-" + f);
+  else if (t) parts.push("until-" + t);
+  else parts.push(todayStr());
+  return parts.join("-");
+}
 
 function csvEscape(v){
   if (v===null||v===undefined) return "";
@@ -426,7 +442,10 @@ var state = {
   reportDateTo: "",
   modelsSelId: null,
   modelsSelStepId: null,
-  expandedSteps: {}
+  expandedSteps: {},
+  nameW: 260,
+  modelsSelectMode: false,
+  modelsChecked: {}
 };
 var tickTimer = null;
 
@@ -474,6 +493,7 @@ function init(){
   state.records = r || [];
   state.studies = studies || [];
   state.operatorName = settings.operatorName || "";
+  state.nameW = Math.min(700, Math.max(140, parseInt(settings.nameW,10) || 260));
   if (!m || !m.length) lsSet(LS_MODELS, state.models);
   state.timerModelId = state.models[0] ? state.models[0].id : null;
   state.modelsSelId = state.models[0] ? state.models[0].id : null;
@@ -482,14 +502,35 @@ function init(){
     state.timerModelId = active.timerModelId || state.timerModelId;
     state.activeStudyId = active.activeStudyId || null;
     state.timers = active.timers || {};
-    if (active.sessionStart && Date.now() - active.sessionStart < 16*3600*1000) state.sessionStart = active.sessionStart;
+    if (active.sessionStart) state.sessionStart = active.sessionStart;
   }
   if (!state.models.some(function(m){ return m.id === state.timerModelId; })){
     state.timerModelId = state.models[0] ? state.models[0].id : null; state.timers = {};
   }
   if (state.activeStudyId && !state.studies.some(function(st){ return st.id === state.activeStudyId && st.status === "in-progress"; })) state.activeStudyId = null;
+  persistActiveState();
   render();
+  var nRun = Object.keys(state.timers).length;
+  if (nRun) showToast("Restored " + nRun + " running stopwatch" + (nRun===1?"":"es") + " from before the page closed");
 }
+
+/* Keep several tabs / windows in step: another tab changed the saved data, so reload it here. */
+function syncFromStorage(){
+  var m = lsGet(LS_MODELS), r = lsGet(LS_RECORDS), st = lsGet(LS_STUDIES), a = lsGet(LS_ACTIVE);
+  if (m && m.length) state.models = m;
+  if (r) state.records = r;
+  if (st) state.studies = st;
+  if (a && a.timers){
+    state.timers = a.timers;
+    state.activeStudyId = a.activeStudyId || null;
+    if (a.sessionStart) state.sessionStart = a.sessionStart;
+    if (a.timerModelId && state.models.some(function(x){ return x.id === a.timerModelId; })) state.timerModelId = a.timerModelId;
+  }
+  if (!state.models.some(function(x){ return x.id === state.modelsSelId; })) state.modelsSelId = state.models[0] ? state.models[0].id : null;
+  if (!state.models.some(function(x){ return x.id === state.timerModelId; })) state.timerModelId = state.models[0] ? state.models[0].id : null;
+}
+var pendingSyncRender = false;
+function typingNow(){ var e = document.activeElement; return !!(e && /^(INPUT|TEXTAREA|SELECT)$/.test(e.tagName)); }
 
 function persistModels(next){
   state.models = next;
@@ -506,7 +547,7 @@ function persistStudies(next){
 function persistActiveState(){
   lsSet(LS_ACTIVE, { timerModelId: state.timerModelId, activeStudyId: state.activeStudyId, timers: state.timers, sessionStart: state.sessionStart });
 }
-function persistSettings(){ lsSet(LS_SETTINGS, { operatorName: state.operatorName || "" }); }
+function persistSettings(){ lsSet(LS_SETTINGS, { operatorName: state.operatorName || "", nameW: state.nameW }); }
 function getActiveStudy(){
   return state.studies.find(function(st){ return st.id === state.activeStudyId && st.status === "in-progress"; }) || null;
 }
@@ -625,12 +666,21 @@ function startTick(){
       el.textContent = fmtClock(ms);
       var step = steps.find(function(s){ return s.id === stepId; });
       var over = step && step.target ? (ms/1000 > step.target) : false;
-      el.style.color = over ? "#f2b45a" : "var(--lcd-fg)";
+      el.style.color = over ? "#c2410c" : "#0a5c4a";
     });
     if (stale) renderTab();
   }, 200);
 }
 
+window.setNameWidth = function(v){
+  state.nameW = Math.min(700, Math.max(140, parseInt(v,10) || 260));
+  document.querySelectorAll("textarea.step-name").forEach(function(t){ t.style.flexBasis = state.nameW + "px"; t.style.minWidth = Math.min(state.nameW,140) + "px"; });
+  autosizeNames(); persistSettings();
+};
+function autosizeNames(){
+  document.querySelectorAll("textarea.step-name").forEach(function(t){ t.style.height = "auto"; t.style.height = (t.scrollHeight + 2) + "px"; });
+}
+window.addEventListener("resize", function(){ autosizeNames(); });
 window.timerSelectModel = function(id){
   if (anyTimerActive()){ showToast("Stop or discard running timers before switching models", "err"); return; }
   state.timerModelId = id;
@@ -688,7 +738,11 @@ window.discardTiming = function(stepId){
   delete state.timers[stepId]; touchStudy(); persistActiveState(); renderTab();
 };
 
-window.resetProgress = function(){ state.sessionStart = Date.now(); persistActiveState(); renderTab(); };
+window.resetProgress = function(){
+  if (anyTimerActive()){ showToast("Stop or discard the running stopwatches before starting a new study", "err"); return; }
+  if (!window.confirm("Start a new study?\n\nThis clears the reading counters and the per-step reading lists on the Timer so you can begin fresh. Everything already recorded stays in the Report.")) return;
+  state.sessionStart = Date.now(); state.lastReading = null; persistActiveState(); showToast("New study started — counters reset"); renderTab();
+};
 
 window.manualSelectStep = function(id){ state.manualStepId = id; };
 window.manualSubmit = function(stepId){
@@ -860,6 +914,40 @@ window.removeStep = function(stepId){
   if (state.modelsSelStepId === stepId) state.modelsSelStepId = remaining[0] ? remaining[0].id : null;
   renderTab();
 };
+function readingsForStep(modelId, stepId){ return state.records.filter(function(r){ return r.modelId === modelId && r.stepId === stepId; }).length; }
+function removeStepsByIds(ids, what){
+  var sel = state.models.find(function(m){ return m.id === state.modelsSelId; });
+  if (!sel || !ids.length) return;
+  var busy = ids.filter(function(id){ return !!state.timers[id]; });
+  if (busy.length){ showToast("Stop or discard the running stopwatch on those steps first", "err"); return; }
+  var nRead = ids.reduce(function(n,id){ return n + readingsForStep(sel.id, id); }, 0);
+  var msg = "Delete " + ids.length + " step" + (ids.length===1?"":"s") + (what ? " " + what : "") + " from " + sel.name + "?"
+    + (nRead ? "\n\nTheir " + nRead + " saved reading" + (nRead===1?"":"s") + (nRead===1?" stays":" stay") + " in the Report (you can remove them there)." : "");
+  if (!window.confirm(msg)) return;
+  var gone = {}; ids.forEach(function(id){ gone[id] = true; delete state.timers[id]; delete state.modelsChecked[id]; });
+  var remaining = sel.steps.filter(function(s){ return !gone[s.id]; });
+  persistModels(state.models.map(function(m){ return m.id === sel.id ? Object.assign({}, m, { steps: remaining }) : m; }));
+  if (gone[state.modelsSelStepId]) state.modelsSelStepId = remaining[0] ? remaining[0].id : null;
+  persistActiveState();
+  showToast(ids.length + " step" + (ids.length===1?"":"s") + " deleted");
+  renderTab();
+}
+window.toggleModelsSelect = function(){ state.modelsSelectMode = !state.modelsSelectMode; state.modelsChecked = {}; renderTab(); };
+window.toggleStepCheck = function(id){ if (state.modelsChecked[id]) delete state.modelsChecked[id]; else state.modelsChecked[id] = true; renderTab(); };
+window.checkAllSteps = function(on){
+  var sel = state.models.find(function(m){ return m.id === state.modelsSelId; });
+  state.modelsChecked = {};
+  if (on && sel) sel.steps.forEach(function(s){ state.modelsChecked[s.id] = true; });
+  renderTab();
+};
+window.deleteCheckedSteps = function(){ removeStepsByIds(Object.keys(state.modelsChecked)); };
+window.deleteEmptySteps = function(){
+  var sel = state.models.find(function(m){ return m.id === state.modelsSelId; });
+  if (!sel) return;
+  var ids = sel.steps.filter(function(s){ return readingsForStep(sel.id, s.id) === 0; }).map(function(s){ return s.id; });
+  if (!ids.length){ showToast("Every step in this model has readings"); return; }
+  removeStepsByIds(ids, "that have no readings");
+};
 window.moveStep = function(idx, dir){
   var sel = state.models.find(function(m){ return m.id === state.modelsSelId; });
   if (!sel) return;
@@ -939,7 +1027,7 @@ function buildWideReportExport(records){
 
 window.downloadReportExcel = function(){
   var data = buildWideReportExport(getFilteredRecords());
-  downloadExcel("cycle-time-report-"+todayStr()+".xlsx", "Cycle Time Studio — Report", data.headers, data.rows);
+  downloadExcel("cycle-time-report-"+reportFileTag(false)+".xlsx", "Cycle Time Studio — Report", data.headers, data.rows);
   showToast("Report exported in wide Excel format — CT1, CT2, CT3… across each row");
 };
 
@@ -955,6 +1043,31 @@ window.setSessionField = function(field, val){
 };
 window.setReportDateFrom = function(v){ state.reportDateFrom = v; renderTab(); };
 window.setReportDateTo = function(v){ state.reportDateTo = v; renderTab(); };
+var reportGroupIds = [];
+function orphanRecords(){
+  return state.records.filter(function(r){
+    var m = state.models.find(function(mm){ return mm.id === r.modelId; });
+    return !m || !m.steps.some(function(st){ return st.id === r.stepId; });
+  });
+}
+window.removeGroupReadings = function(i){
+  var ids = reportGroupIds[i] || [];
+  if (!ids.length) return;
+  if (!window.confirm("Remove " + ids.length + " reading" + (ids.length===1?"":"s") + " from the report?\n\nThis can't be undone (export a Backup first if unsure).")) return;
+  var gone = {}; ids.forEach(function(id){ gone[id] = true; });
+  persistRecords(state.records.filter(function(r){ return !gone[r.id]; }));
+  showToast(ids.length + " reading" + (ids.length===1?"":"s") + " removed"); renderTab();
+};
+window.removeOrphanReadings = function(){
+  var o = orphanRecords();
+  if (!o.length){ showToast("Nothing to clean up"); return; }
+  var names = {}; o.forEach(function(r){ names[(r.modelName||"?") + " · " + (r.stepName||"?")] = 1; });
+  var list = Object.keys(names).slice(0,8).join("\n");
+  if (!window.confirm("Remove " + o.length + " reading(s) from steps that no longer exist in any model?\n\n" + list + (Object.keys(names).length>8?"\n…":"") + "\n\nThis can't be undone.")) return;
+  var gone = {}; o.forEach(function(r){ gone[r.id] = true; });
+  persistRecords(state.records.filter(function(r){ return !gone[r.id]; }));
+  showToast(o.length + " readings removed"); renderTab();
+};
 window.deleteRecord = function(id){
   persistRecords(state.records.filter(function(r){ return r.id !== id; }));
   renderTab();
@@ -968,8 +1081,19 @@ function localDayMs(str, plusDays){
   var p = String(str).split("-");
   return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]) + (plusDays || 0)).getTime();
 }
+function liveRec(r){
+  var m = state.models.find(function(mm){ return mm.id === r.modelId; });
+  if (!m) return r;
+  var o = Object.assign({}, r, { modelName: m.name });
+  var st = m.steps.find(function(x){ return x.id === r.stepId; });
+  if (st){
+    o.stepName = st.name; o.station = st.station;
+    if (st.target !== undefined && st.target !== null) o.target = st.target;
+  }
+  return o;
+}
 function getFilteredRecords(){
-  return state.records.filter(function(r){
+  return state.records.map(liveRec).filter(function(r){
     if (state.reportFilterModel !== "all" && r.modelId !== state.reportFilterModel) return false;
     var t = new Date(r.timestamp).getTime();
     if (state.reportDateFrom && t < localDayMs(state.reportDateFrom, 0)) return false;
@@ -1016,10 +1140,10 @@ function computeStepStats(filtered, groupBy){
         station: groupBy === "stage" ? null : r.station,
         stepName: groupBy === "step" ? r.stepName : null,
         stage: groupBy === "stage" ? (stage || "(no stage)") : stage,
-        target: r.target, vals: []
+        target: r.target, vals: [], ids: []
       };
     }
-    groups[key].vals.push(recordCT(r));
+    groups[key].vals.push(recordCT(r)); groups[key].ids.push(r.id);
     if (groupBy !== "step" && (groups[key].target===null || groups[key].target===undefined) && r.target!==null && r.target!==undefined){
       groups[key].target = r.target;
     }
@@ -1029,7 +1153,7 @@ function computeStepStats(filtered, groupBy){
     var g = groups[k];
     return {
       modelName:g.modelName, station:g.station, stepName:g.stepName, stage:g.stage, target:g.target,
-      count:g.vals.length, avg:mean(g.vals), sd:sd(g.vals),
+      count:g.vals.length, avg:mean(g.vals), sd:sd(g.vals), ids:g.ids,
       min:Math.min.apply(null,g.vals), max:Math.max.apply(null,g.vals), med:median(g.vals)
     };
   }).sort(function(a,b){ return (a.modelName+(a.stage||"")+(a.station||"")).localeCompare(b.modelName+(b.stage||"")+(b.station||"")); });
@@ -1221,9 +1345,9 @@ function buildDonutSVG(byStation){
 window.exportRecordsCSV = function(){
   // Raw Data uses the SAME agreed wide Excel format as Report.
   // One row per date / model / step / session / worker, with CT1, CT2, CT3... horizontally.
-  var data = buildWideReportExport(state.records);
-  downloadExcel("cycle-time-raw-data-"+todayStr()+".xlsx", "Cycle Time Studio — Raw Data", data.headers, data.rows);
-  showToast("Raw Data exported in the same wide Excel format as Report");
+  var data = buildWideReportExport(getFilteredRecords());
+  downloadExcel("cycle-time-raw-data-"+reportFileTag(false)+".xlsx", "Cycle Time Studio — Raw Data", data.headers, data.rows);
+  showToast("Exported "+getFilteredRecords().length+" filtered readings");
 };
 window.exportSummaryCSV = function(){
   var stats = computeStepStats(getFilteredRecords(), state.reportGroupBy || "step");
@@ -1233,7 +1357,7 @@ window.exportSummaryCSV = function(){
     rows.push([s.modelName, s.stage||"", s.station||"", s.stepName || "", s.target!=null?s.target:"", s.count,
       Number(s.avg.toFixed(3)), s.sd!==null?Number(s.sd.toFixed(3)):"", Number(s.med.toFixed(3)), Number(s.min.toFixed(3)), Number(s.max.toFixed(3))]);
   });
-  downloadExcel("cycle-time-summary-"+todayStr()+".xlsx", "Cycle Time Studio — Summary", header, rows);
+  downloadExcel("cycle-time-summary-"+reportFileTag(true)+".xlsx", "Cycle Time Studio — Summary", header, rows);
   showToast("Summary exported (Excel)");
 };
 window.exportModelsCSV = function(){
@@ -1261,7 +1385,7 @@ window.exportTimeStudyCSV = function(){
     var cts = [0,1,2,3,4].map(function(k){ return vals[k] !== undefined ? Number(vals[k].toFixed(2)) : ""; });
     rows.push([i+1,s.name,first.hc||"",first.workerId||"",first.session||""].concat(cts).concat([avg!=null?Number(avg.toFixed(2)):"",sdVal!=null?Number(sdVal.toFixed(2)):"",comment]));
   });
-  downloadExcel("cycle-time-study-"+slugKey(selectedModel.name)+"-"+todayStr()+".xlsx","Cycle Time Studio — Time Study",header,rows);
+  downloadExcel("cycle-time-study-"+reportFileTag(false)+".xlsx","Cycle Time Studio — Time Study",header,rows);
   showToast("Time study sheet exported (Excel)");
 };
 window.exportLocalBackup = function(){
@@ -1530,7 +1654,7 @@ function renderHeader(){
   }
   return '<header>'
     + '<div class="brand"><div class="brand-badge">'+ICO.timer+'</div>'
-    + '<div><div class="brand-title">Cycle Time Studio</div><div class="brand-sub">Offline time-study &amp; station tracking</div></div></div>'
+    + '<div><div class="brand-title">Cycle Time Studio</div><div class="brand-sub">Offline time-study &amp; station tracking · v2026-10-27</div></div></div>'
     + '<nav>' + tab("timer","Timer",ICO.clock) + tab("models","Models &amp; Steps",ICO.grid) + tab("report","Report",ICO.chart) + '</nav>'
     + '</header>';
 }
@@ -1586,7 +1710,8 @@ function renderTimerTab(){
     + '</div>'
     + (model ? (
         '<div style="font-size:12px;font-weight:500;color:'+(allMet?"var(--teal-dark)":"#6b665b")+'">'+stepsMet+'/'+steps.length+' steps have the reps they need'+(allMet?" — stage complete ✓":"")+'</div>'
-        + '<button class="btn-link" style="align-self:flex-start" onclick="resetProgress()">Reset progress</button>'
+        + '<button class="btn-link" style="align-self:flex-start" onclick="resetProgress()">Start new study (reset counters)</button>'
+        + '<div style="font-size:11px;opacity:.55;margin-top:-6px">Readings and running stopwatches are kept — even after a refresh — until you start a new study.</div>'
       ) : "")
     + '<div style="border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:8px">'
     + '<div class="row" style="justify-content:space-between;align-items:center;gap:8px">'
@@ -1676,9 +1801,9 @@ function renderTimerTab(){
       + (running ? (paused ? 'border-color:var(--amber)' : 'border-color:var(--teal)') : '') + '">'
       + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
       + '<span class="mono" style="font-size:10.5px;font-weight:700;opacity:.5;flex-shrink:0">S'+(i+1)+'</span>'
-      + '<input type="text" value="'+esc(s.name)+'" '+(running?"disabled":"")+' onchange="timerUpdateStepField(\''+s.id+'\',\'name\',this.value)" style="flex:1;min-width:120px;font-weight:500" />'
+      + '<textarea class="step-name" rows="1" '+(running?"disabled":"")+' onchange="timerUpdateStepField(\''+s.id+'\',\'name\',this.value.replace(/\\s*\\n+\\s*/g,\' \'))" onkeydown="if(event.key===\'Enter\'){event.preventDefault();this.blur();}" style="flex:1 1 '+state.nameW+'px;min-width:'+Math.min(state.nameW,140)+'px">'+esc(s.name)+'</textarea>'
       + '<span class="step-badge" style="background:'+(met?"#e7f2ef":"rgba(0,0,0,.06)")+';color:'+(met?"var(--teal-dark)":"#8a8578")+'">'+n+'/'+reps+'</span>'
-      + '<span id="clock-'+s.id+'" class="mono" style="font-size:17px;font-weight:700;min-width:82px;text-align:right;color:'+(running?(over?"#c96a1f":"var(--teal-dark)"):"#b7b2a3")+'">'+fmtClock(ms)+'</span>'
+      + '<span id="clock-'+s.id+'" class="mono" style="font-size:24px;font-weight:800;min-width:110px;text-align:right;letter-spacing:.02em;color:'+(running?(over?"#c2410c":"#0a5c4a"):"#5f5a4e")+'">'+fmtClock(ms)+'</span>'
       + (running && paused ? '<span style="font-size:10px;font-weight:600;color:var(--amber);text-transform:uppercase">Paused</span>' : "")
       + '<div class="row" style="gap:4px">'+controls+'</div>'
       + '</div>'
@@ -1690,7 +1815,10 @@ function renderTimerTab(){
   var stepsBlock = '<div style="display:flex;flex-direction:column;gap:6px">'
     + '<div class="row" style="justify-content:space-between">'
     + '<div style="font-size:12px;font-weight:600;opacity:.7;text-transform:uppercase;letter-spacing:.04em">Stations ('+steps.length+') — start as many at once as you like</div>'
-    + '<button class="btn btn-outline" style="padding:6px 10px;font-size:12px" '+(!model?"disabled":"")+' onclick="timerAddStep()">'+ICO.plus+' Add step</button>'
+    + '<div class="row" style="gap:8px;flex-wrap:wrap">'
+    + '<label style="display:flex;align-items:center;gap:6px;font-size:11.5px;opacity:.75" title="Make the step-name boxes wider or narrower">Name width'
+    + '<input type="range" min="140" max="700" step="20" value="'+state.nameW+'" oninput="setNameWidth(this.value)" style="width:110px" /></label>'
+    + '<button class="btn btn-outline" style="padding:6px 10px;font-size:12px" '+(!model?"disabled":"")+' onclick="timerAddStep()">'+ICO.plus+' Add step</button></div>'
     + '</div>'
     + (steps.length ? rows : '<div class="card" style="font-size:12.5px;opacity:.55">No steps yet — click "Add step" or set them up in Models &amp; Steps.</div>')
     + '</div>';
@@ -1699,7 +1827,7 @@ function renderTimerTab(){
 
   var mid = '<div style="display:flex;flex-direction:column;gap:12px">' + lastReading + stepsBlock + hint + '</div>';
 
-  var recent = state.records.slice().sort(function(a,b){ return new Date(b.timestamp)-new Date(a.timestamp); }).slice(0,8);
+  var recent = state.records.map(liveRec).sort(function(a,b){ return new Date(b.timestamp)-new Date(a.timestamp); }).slice(0,8);
   var recentHtml = recent.length ? recent.map(function(r){
     var over = r.target && recordCT(r) > r.target;
     return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--line)">'
@@ -1750,21 +1878,41 @@ function renderModelsTab(){
     var stepItems = "";
     var lastStage = null;
     sel.steps.forEach(function(s,i){
-      stepItems += buildInsertGap("modelsInsertStepAt", i);
+      if (!state.modelsSelectMode) stepItems += buildInsertGap("modelsInsertStepAt", i);
       var stg = s.stage || "";
       if (stg !== lastStage){
         stepItems += '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;opacity:.45;padding:8px 6px 2px">'+(stg?esc(stg):"No stage")+'</div>';
         lastStage = stg;
       }
       var active = s.id === state.modelsSelStepId;
-      stepItems += '<button class="model-list-btn" data-active="'+(active?"1":"0")+'" onclick="modelsSelectStep(\''+s.id+'\')">'
-        + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(i+1)+'. '+esc(s.station)+' · '+esc(s.name)+'</span></button>';
+      if (state.modelsSelectMode){
+        stepItems += '<div class="model-list-btn" data-active="'+(state.modelsChecked[s.id]?"1":"0")+'" style="gap:8px;cursor:pointer" onclick="toggleStepCheck(\''+s.id+'\')">'
+          + '<input type="checkbox" '+(state.modelsChecked[s.id]?"checked":"")+' style="pointer-events:none;flex-shrink:0" />'
+          + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(i+1)+'. '+esc(s.station)+' · '+esc(s.name)+'</span>'
+          + '<span style="font-size:10.5px;opacity:.5;flex-shrink:0">'+readingsForStep(sel.id, s.id)+' rd</span></div>';
+      } else {
+      stepItems += '<div style="display:flex;align-items:stretch;gap:2px">'
+        + '<button class="model-list-btn" data-active="'+(active?"1":"0")+'" title="'+esc(s.station+' · '+s.name)+'" onclick="modelsSelectStep(\''+s.id+'\')">'
+        + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(i+1)+'. '+esc(s.station)+' · '+esc(s.name)+'</span></button>'
+        + '<button class="btn-danger" title="Delete this step" aria-label="Delete this step" style="padding:0 7px;flex-shrink:0;border-radius:8px" onclick="removeStep(\''+s.id+'\')">'+ICO.trash+'</button>'
+        + '</div>';
+      }
     });
-    if (sel.steps.length) stepItems += buildInsertGap("modelsInsertStepAt", sel.steps.length);
+    if (sel.steps.length && !state.modelsSelectMode) stepItems += buildInsertGap("modelsInsertStepAt", sel.steps.length);
     stepsPane = '<div class="card" style="display:flex;flex-direction:column;gap:4px;height:fit-content;max-height:540px;overflow-y:auto">'
       + '<div class="row" style="justify-content:space-between;padding:0 2px 4px">'
       + '<div style="font-size:12px;font-weight:600;opacity:.7;text-transform:uppercase;letter-spacing:.04em">Steps ('+sel.steps.length+')</div>'
-      + '<button class="btn-link" style="text-decoration:none;font-size:15px" onclick="addStep()">'+ICO.plus+'</button></div>'
+      + '<div class="row" style="gap:10px"><button class="btn-link" style="font-size:12px" onclick="toggleModelsSelect()">'+(state.modelsSelectMode?"Done":"Select & delete")+'</button>'
+      + '<button class="btn-link" style="text-decoration:none;font-size:15px" onclick="addStep()">'+ICO.plus+'</button></div></div>'
+      + (state.modelsSelectMode ? (
+          '<div style="display:flex;flex-direction:column;gap:6px;padding:0 2px 8px;border-bottom:1px solid var(--line);margin-bottom:4px">'
+          + '<div class="row" style="gap:6px;flex-wrap:wrap">'
+          + '<button class="btn btn-outline" style="padding:5px 9px;font-size:11.5px" onclick="checkAllSteps(true)">Select all</button>'
+          + '<button class="btn btn-outline" style="padding:5px 9px;font-size:11.5px" onclick="checkAllSteps(false)">None</button>'
+          + '<button class="btn btn-danger" style="padding:5px 9px;font-size:11.5px" '+(Object.keys(state.modelsChecked).length?"":"disabled")+' onclick="deleteCheckedSteps()">'+ICO.trash+' Delete selected ('+Object.keys(state.modelsChecked).length+')</button></div>'
+          + '<button class="btn btn-outline" style="padding:5px 9px;font-size:11.5px;align-self:flex-start" onclick="deleteEmptySteps()">Remove all steps that have no readings</button>'
+          + '</div>'
+        ) : "")
       + '<div class="row" style="gap:6px;padding:0 2px 6px"><label class="field-label" style="white-space:nowrap">Default reps for new steps</label>'
       + '<input type="number" min="1" step="1" value="'+(sel.targetSamples||5)+'" onchange="updateModelField(\''+sel.id+'\',\'targetSamples\',Math.max(1,parseInt(this.value,10)||1))" style="width:56px" /></div>'
       + (sel.steps.length ? stepItems : '<div style="font-size:12.5px;opacity:.55;padding:6px 2px">No steps yet.</div>')
@@ -1869,16 +2017,21 @@ function renderReportTab(){
     ? ('<div class="card" style="margin-top:14px"><div style="font-size:13px;font-weight:600;margin-bottom:10px">Contribution to total cycle time — '+esc(selectedModel.name)+' (by '+(donutIsStage?"stage":"station")+')</div>'+buildDonutSVG(donutData)+'</div>')
     : '<div class="card" style="margin-top:14px;font-size:12.5px;opacity:.6">Pick a specific model above to see each stage\'s % share of the total cycle time.</div>';
 
-  var stepRows = stepStats.map(function(s){
+  reportGroupIds = stepStats.map(function(s){ return s.ids; });
+  var nOrphan = orphanRecords().length;
+  var stepRows = stepStats.map(function(s, gi){
     var over = s.target && s.avg > s.target;
     return '<tr><td>'+esc(s.modelName)+'</td><td>'+(s.stage?esc(s.stage):"<span style=\"opacity:.45\">—</span>")+'</td><td>'+(s.station?esc(s.station):"<span style=\"opacity:.45\">— combined —</span>")+'</td><td>'+(s.stepName?esc(s.stepName):"<span style=\"opacity:.45\">— all steps —</span>")+'</td>'
       + '<td class="num mono">'+(s.target?s.target.toFixed(1)+"s":"—")+'</td><td class="num mono">'+s.count+'</td>'
       + '<td class="num mono" style="font-weight:600;color:'+(over?"var(--red)":"var(--teal-dark)")+'">'+fmtSec(s.avg)+'</td>'
       + '<td class="num mono">'+(s.sd!==null?fmtSec(s.sd):"—")+'</td><td class="num mono">'+fmtSec(s.med)+'</td>'
-      + '<td class="num mono">'+fmtSec(s.min)+'</td><td class="num mono">'+fmtSec(s.max)+'</td></tr>';
+      + '<td class="num mono">'+fmtSec(s.min)+'</td><td class="num mono">'+fmtSec(s.max)+'</td>'
+      + '<td style="text-align:right"><button class="btn-danger" title="Remove these readings from the report" style="padding:3px" onclick="removeGroupReadings('+gi+')">'+ICO.trash+'</button></td></tr>';
   }).join("");
   var stepTable = '<div class="card tbl-wrap" style="margin-top:14px"><div style="font-size:13px;font-weight:600;margin-bottom:8px">'+(groupBy==="stage"?"Stage":groupBy==="station"?"Station":"Step")+' summary</div>'
-    + '<table><thead><tr><th>Model</th><th>Stage</th><th>Station</th><th>Step</th><th>Target</th><th>Count</th><th>Avg</th><th>SD</th><th>Median</th><th>Min</th><th>Max</th></tr></thead>'
+    + '<div class="row" style="gap:8px;margin-bottom:8px;flex-wrap:wrap"><span style="font-size:11.5px;opacity:.6">Use the trash button on a row to remove extra steps\' readings from the report.</span>'
+    + (nOrphan ? '<button class="btn btn-outline" style="padding:5px 9px;font-size:11.5px" onclick="removeOrphanReadings()">'+ICO.trash+' Remove readings of deleted steps ('+nOrphan+')</button>' : '') + '</div>'
+    + '<table><thead><tr><th>Model</th><th>Stage</th><th>Station</th><th>Step</th><th>Target</th><th>Count</th><th>Avg</th><th>SD</th><th>Median</th><th>Min</th><th>Max</th><th></th></tr></thead>'
     + '<tbody>'+stepRows+'</tbody></table></div>';
 
   var cycleTable = "";
@@ -1910,6 +2063,7 @@ function renderReportTab(){
 /* Post-render wiring (things that can't be plain inline attributes)       */
 /* ---------------------------------------------------------------------- */
 function wireAfterRender(){
+  autosizeNames();
   if (state.tab === "timer"){
     if (anyTimerRunning()) startTick();
     else clearTick();
@@ -1918,20 +2072,34 @@ function wireAfterRender(){
   }
 }
 
-window.addEventListener("beforeunload",function(){
-  // Persist the timer exactly as-is. Do NOT pause it on navigation/window close.
-  // The elapsed time is calculated from runningSince when the app returns.
+window.addEventListener("beforeunload",function(e){
+  // Save exactly as-is (timers keep counting from runningSince), and warn if stopwatches are active.
   persistActiveState();
-});
-// IMPORTANT: Do not pause timers when the tab/window becomes hidden. Browsers
-// throttle display callbacks in background tabs, but Date.now() still lets us
-// calculate the true elapsed wall-clock time when the page becomes visible again.
-document.addEventListener("visibilitychange",function(){
-  if(!document.hidden){
-    if(anyTimerRunning()){ startTick(); }
-    else { clearTick(); }
-    renderTab();
+  if (anyTimerActive()){
+    var msg = "You have stopwatches in progress. They are saved and will resume if you come back, but leaving now may interrupt your study.";
+    e.preventDefault(); e.returnValue = msg; return msg;
   }
+});
+window.addEventListener("pagehide", function(){ persistActiveState(); });
+// Autosave every few seconds while anything is running (covers mobile browsers that skip beforeunload).
+setInterval(function(){ if (anyTimerActive()) persistActiveState(); }, 3000);
+// Another tab/window changed the saved data -> pull it in so Report/Timer never show stale numbers.
+window.addEventListener("storage", function(e){
+  if (e.key && e.key.indexOf("cts_") !== 0) return;
+  syncFromStorage();
+  if (typingNow()){ pendingSyncRender = true; return; }
+  render();
+});
+document.addEventListener("focusout", function(){
+  if (!pendingSyncRender) return;
+  setTimeout(function(){ if (!typingNow()){ pendingSyncRender = false; render(); } }, 250);
+});
+// IMPORTANT: Do not pause timers when the tab/window becomes hidden. Date.now() gives the true elapsed time.
+document.addEventListener("visibilitychange",function(){
+  if (document.hidden){ persistActiveState(); return; }
+  syncFromStorage();
+  if(anyTimerRunning()){ startTick(); } else { clearTick(); }
+  if (!typingNow()) renderTab();
 });
 init();
 })();
